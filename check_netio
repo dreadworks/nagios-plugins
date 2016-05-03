@@ -42,6 +42,7 @@ INTERVAL=1
 STATE_OK=0
 STATE_WARNING=1
 STATE_CRITICAL=2
+STATE_UNKNOWN=3
 
 VERSION=1.0
 
@@ -153,6 +154,15 @@ sleep $INTERVAL
 __get_bytes
 curr_rcvd=$__bytes_rcvd
 curr_sent=$__bytes_sent
+
+
+if [ \
+    -z "$former_rcvd" -o -z "$former_sent" -o \
+    -z "$curr_rcvd" -o -z "$curr_rcvd" \
+]; then
+    echo "NETIO UNKNOWN - could not read values"
+    exit $STATE_UNKNOWN
+fi
 
 
 # calculate velocity
