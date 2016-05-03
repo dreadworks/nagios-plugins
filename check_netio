@@ -1,0 +1,202 @@
+#!/bin/bash
+#
+# check_netio nagios plugin
+# ------------------------------
+#
+# This plugin checks the transmitted data on a specified
+# network interface inside some interval. The original implementation
+# was written by Juned Nemon and the original parts are delimited
+# via comment. Rewritten by Felix Hamann.
+#
+# Changes to the original
+#   - No more hardcoded paths
+#   - Support -c and -w as command line switches
+#   - -c and -w thresholds are optional
+#   - Output performance data
+#   - Removed all unnecessary noise (unused variables etc.)
+#   - Adhere to https://nagios-plugins.org/doc/guidelines.html
+#
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#n
+
+. $(dirname $0)/utils.sh
+
+
+#
+# config
+#
+INTERVAL=1
+
+STATE_OK=0
+STATE_WARNING=1
+STATE_CRITICAL=2
+
+VERSION=1.0
+
+usage() {
+    echo "check_netio $VERSION - Nagios network I/O checker"
+    echo
+    echo "  Usage: check_netio -i IFACE [-w WARN -c CRIT] [-h]"
+    echo "    -i  Network interface (e.g. eth0)"
+    echo "    -w  Warning threshold in bit per second (20000 is 20kBit/s)"
+    echo "    -c  Critical threshold in bit per second (30000 is 30kBit/s)"
+    echo "    -h  Display this text"
+    echo
+}
+
+fail () {
+    >&2 echo "$@"
+    echo
+    usage
+    exit $STATE_CRITICAL
+}
+
+# set by parse_args
+warn=
+crit=
+iface=
+
+# state
+__bytes_rcvd=
+__bytes_sent=
+
+
+
+################################################################################
+# foreign code (heavily adjusted)
+
+__get_bytes () {
+    line=$( cat /proc/net/dev     |\
+                  grep $iface     |\
+                  cut -d ':' -f 2 |\
+                  awk '{print "__bytes_rcvd="$1, "__bytes_sent="$9}')
+    eval $line
+}
+
+# Function which calculates the speed using actual and old byte
+# number. Speed is shown in KByte per second when greater or equal
+# than 1 KByte per second. This function should be called each second.
+__get_velocity () {
+    if [ -z "$1" -o -z "$2" ]; then
+        fail "assertion failed: __get_velocity($1, $2) - not enough args set"
+    fi
+
+    value=$1
+    old_value=$2
+
+    let vel=" $value - $old_value"
+    let vel=" $vel * 8"
+    echo -n "$vel";
+}
+
+# /foreign code
+################################################################################
+
+
+parse_args () {
+    if [ 0 -lt $# ]; then
+        while getopts i:w:c:h arg "$@"; do
+            case $arg in
+                h)
+                    usage
+                    exit 0;;
+                i)
+                    iface=$OPTARG;;
+                w)
+                    warn=$OPTARG;;
+                c)
+                    crit=$OPTARG;;
+                *)
+                    fail
+            esac
+        done
+    else
+        fail "not enough arguments provided"
+    fi
+
+    # check that both -w and -c are set
+    if [ -n "$warn" -o -n "$crit" ]; then
+        if [ -z "$warn" -o -z "$crit" ]; then
+            fail "both -w and -c must be set"
+        fi
+
+        if [ "$crit" -le "$warn" ]; then
+            fail "setting -c lower than -w does not make sense"
+        fi
+    fi
+}
+
+
+
+# -------------------------------------------------
+
+parse_args $@
+
+__get_bytes
+former_rcvd=$__bytes_rcvd
+former_sent=$__bytes_sent
+
+sleep $INTERVAL
+
+__get_bytes
+curr_rcvd=$__bytes_rcvd
+curr_sent=$__bytes_sent
+
+
+# calculate velocity
+vel_rcvd=$(__get_velocity $curr_rcvd $former_rcvd) || fail
+vel_sent=$(__get_velocity $curr_sent $former_sent) || fail
+let vel_total="$vel_rcvd + $vel_sent"
+
+# format performance data
+FMT_PERF="%s=%s;$warn;$crit"
+perf_down=$(printf  $FMT_PERF netio_down  $vel_rcvd)
+perf_up=$(printf    $FMT_PERF netio_up    $vel_sent)
+perf_total=$(printf $FMT_PERF netio_total $vel_total)
+
+# format result string
+rc=$STATE_CRITICAL
+result=
+
+FMT_STR="NETIO %s: $iface|$perf_total $perf_down $perf_up\n"
+if [ -n "$warn" -a -n "$crit" ]; then
+
+    echo "checking with warn=$warn and crit=$crit"
+
+    if [ $vel_total -lt "$crit" -a $vel_total -ge "$warn" ]; then
+        result=$(printf "$FMT_STR" WARNING)
+        rc=$STATE_WARNING
+    fi
+
+    if [ $vel_total -ge "$crit" ]; then
+        result=$(printf "$FMT_STR" CRITICAL)
+        rc=$STATE_CRITICAL
+    fi
+
+    if [ $vel_total -lt "$warn" ]; then
+        result=$(printf "$str_fmt" OK)
+        rc=$STATE_OK
+    fi
+
+else
+
+    result=$(printf "$FMT_STR" OK)
+    rc=$STATE_OK
+
+fi
+
+echo $result
+exit $rc
+
